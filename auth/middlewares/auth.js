@@ -2,24 +2,22 @@ import { verifyToken } from "../lib/jwt.js";
 
 export const authenticate = (req, res, next) => {
     try {
-        const token =
-            req.cookies?.token ||
-            req.headers.authorization?.split(" ")[1];
+        const header = req.headers.authorization;
 
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                message: "Unauthorized",
-            });
+        if (!header?.startsWith("Bearer ")) {
+            return res.status(401).json({ success: false, message: "Unauthorized" });
         }
 
-        req.user = verifyToken(token); // { id, role, iat, exp }
+        const payload = verifyToken(header.split(" ")[1]);
+
+        if (payload.type !== "access") {
+            return res.status(401).json({ success: false, message: "Invalid token type" });
+        }
+
+        req.user = { id: payload.id, role: payload.role };
         next();
-    } catch (error) {
-        return res.status(401).json({
-            success: false,
-            message: "Invalid or expired token",
-        });
+    } catch {
+        return res.status(401).json({ success: false, message: "Invalid or expired token" });
     }
 };
 
