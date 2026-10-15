@@ -2,7 +2,9 @@
 
 import prisma from "../lib/prisma.js";
 import bcrypt from "bcrypt";
-import { signToken } from "../lib/jwt.js";
+
+import {  verifyToken } from "../lib/jwt.js"; 
+import { issueTokens, refreshExists, revokeRefresh, revokeAllRefresh } from "../lib/refreshStore.js";
 
 //signup controller
 export const signup = async (req, res) => {
@@ -44,6 +46,8 @@ export const signup = async (req, res) => {
             where: { phone },
         });
 
+   
+
         if (existingUser) {
             return res.status(409).json({
                 success: false,
@@ -51,7 +55,7 @@ export const signup = async (req, res) => {
             });
         }
 
-        const passwordHash = await bcrypt.hash(password, 12);
+        const passwordHash = await bcrypt.hash(password, 10);
 
         const user = await prisma.user.create({
             data: {
@@ -136,13 +140,15 @@ export const login = async (req, res) => {
             });
         }
 
-        const token = signToken({ id: user.id, role: user.role });
+        const { accessToken, refreshToken } = await issueTokens(user);
+
 
 
         return res.status(200).json({
             success: true,
             message: "Login successful",
-            token, // sending beacuse we didnt use cookie we use headers
+            accessToken , // sending beacuse we didnt use cookie we use headers
+            refreshToken,
             user: {
                 id: user.id,
                 name: user.name,
@@ -152,6 +158,7 @@ export const login = async (req, res) => {
             },
         });
     } catch (error) {
+        console.log("error" , error)
         return res.status(500).json({
             success: false,
             message: "Internal server error",
@@ -159,3 +166,84 @@ export const login = async (req, res) => {
     }
 };
 
+
+
+//refresh controller
+export const refresh = async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+
+        if (!refreshToken) {
+            return res.status(401).json({ success: false, message: "Refresh token is required" });
+        }
+
+        let payload;
+        try {
+            payload = verifyToken(refreshToken);
+        } catch {
+            return res.status(401).json({ success: false, message: "Invalid or expired refresh token" });
+        }
+
+        if (payload.type !== "refresh") {
+            return res.status(401).json({ success: false, message: "Invalid token type" });
+        }
+
+        const { id: userId, jti } = payload;
+
+        // Redis mein nahi mila = already use ho chuka (reuse/chori), saare sessions band
+        if (!(await refreshExists(userId, jti))) {
+            await revokeAllRefresh(userId);
+            return res.status(401).json({ success: false, message: "Token reuse detected, login again" });
+        }
+
+        const user = await prisma.user.findUnique({ where: { id: userId } });
+
+        if (!user || !user.isActive) {
+            await revokeAllRefresh(userId);
+            return res.status(401).json({ success: false, message: "User not found or deactivated" });
+        }
+
+        // rotation: purana delete, naya issue
+        await revokeRefresh(userId, jti);
+        const tokens = await issueTokens(user);
+
+        return res.status(200).json({ success: true, ...tokens });
+    } catch (error) {
+        console.error("REFRESH ERROR:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+//logout controller
+export const logout = async (req, res) => {
+    try {
+        const { refreshToken } = req.body;
+
+        if (refreshToken) {
+            try {
+                const payload = verifyToken(refreshToken);
+                if (payload.type === "refresh") {
+                    await revokeRefresh(payload.id, payload.jti);
+                }
+            } catch {
+                // token already invalid, koi dikkat nahi
+            }
+        }
+
+        return res.status(200).json({ success: true, message: "Logged out" });
+    } catch (error) {
+        console.error("LOGOUT ERROR:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
+
+//logout from all devices (authenticate middleware ke saath lagana)
+export const logoutAll = async (req, res) => {
+    try {
+        await revokeAllRefresh(req.user.id);
+        return res.status(200).json({ success: true, message: "Logged out from all devices" });
+    } catch (error) {
+        console.error("LOGOUT ALL ERROR:", error);
+        return res.status(500).json({ success: false, message: "Internal server error" });
+    }
+};
